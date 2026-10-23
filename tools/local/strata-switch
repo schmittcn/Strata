@@ -1,0 +1,140 @@
+#!/bin/sh
+# strata-switch coder|iq2|swift|ornith|ornith8|stop|status|update-check|update|repatch|help: manage the local Strata server
+set -eu
+SRC="$HOME/Projects/Strata"
+STATE="${XDG_STATE_HOME:-$HOME/.local/state}"
+LOG="$STATE/strata-server.log"
+PORT=8095      # muss zu baseURL in opencode.json passen
+CTX=262144     # Kontext (--max-context) fuer Coder und IQ2_XS (volles Fenster des Modells)
+URL=http://127.0.0.1:$PORT/v1/models
+
+running() { pgrep -f '[s]erve/server.py --engine' || true; }
+stop() {
+  pids=$(running)
+  [ -n "$pids" ] || return 0
+  echo "stopping Strata server ($pids)"
+  kill $pids
+  for _ in $(seq 1 30); do [ -z "$(running)" ] && return 0; sleep 1; done
+  echo "server did not stop in 30 s; not starting another" >&2; exit 1
+}
+current() { curl -s -m 3 "$URL" | python3 -c 'import sys,json; print("\n".join(m["id"] for m in json.load(sys.stdin)["data"]))' 2>/dev/null || true; }
+
+# our settings on top of what setup/update writes: port, context, F16, KV streaming (Swift)
+repatch() {
+  python3 - "$SRC" "$PORT" "$CTX" <<'E'
+import glob, json, re, sys
+src, port, ctx = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+for p in sorted(glob.glob(f"{src}/strata-*.json")):
+    try: c = json.load(open(p))
+    except Exception: continue
+    if "args" not in c: continue            # not a server config
+    old = json.dumps(c, sort_keys=True)
+    c["port"] = port
+    for k in ("args", "args_written"):
+        a = c.get(k) or []
+        # Swift IQ3_S: RAM almost full, keep 128K. qwen35moe (Ornith): fp32 KV in VRAM (45 KB/token), so context
+        # and --expert-vram share the card: IQ4_XS 128K + 6 GB experts, Q8_0 64K + 10 GB
+        if "--max-context" in a: a[a.index("--max-context") + 1] = "131072" if "swift" in p or "iq4_xs" in p else "65536" if c.get("arch") == "qwen35moe" else ctx
+    for k in ("args", "args_written"):      # Swift IQ3_S: KV cache in RAM (KV streaming), setup turns it off at 63 GB RAM
+        a = c.get(k)
+        if a and "swift" in p and "--kv-resident" not in a: a += ["--kv-resident", "32768"]
+    if c.get("arch") == "qwen35moe" and "--expert-vram" not in c["args"]:   # q36 path has no --vram-reserve-mib (see context above)
+        c["args"] += ["--expert-vram", "6.0" if "iq4_xs" in p else "10.0"]
+    c.setdefault("env", {})["STRATA_HIP_PROMPT_F16"] = "1"
+    if c.get("arch") != "qwen35moe":         # Qwen3.8: FP32 tiled QSA scorer, same selections, +7% at 128K prompts (docs/AMD_HIP.md RDNA2)
+        c["env"]["STRATA_SELECT_SIMT"] = "1"
+    if "--vram-reserve-mib" not in c["args"] and "--expert-vram" not in c["args"]: print(f"  WARNING {p}: no --vram-reserve-mib (Desktop-Reserve) any more")
+    if json.dumps(c, sort_keys=True) != old:
+        json.dump(c, open(p, "w"), indent=1); print(f"  patched {p.rsplit('/', 1)[1]}")
+for p in sorted(glob.glob(f"{src}/run-*.sh")):
+    s = open(p).read(); n = re.sub(r'"--port" "\d+"', f'"--port" "{port}"', s)
+    if n != s: open(p, "w").write(n); print(f"  patched {p.rsplit('/', 1)[1]}")
+E
+}
+
+# our changes are commits on branch `local` (fork: origin = schmittcn/Strata, upstream = Niko1221/Strata);
+# an update rebases them onto upstream/main, pushes both branches to the fork and rebuilds the engine
+update_src() {
+  cd "$SRC"
+  [ "$(git branch --show-current)" = local ] || { echo "$SRC is not on branch local, nothing touched" >&2; exit 1; }
+  [ -z "$(git status --porcelain --untracked-files=no)" ] || { echo "uncommitted changes in $SRC, commit them on local first (git status)" >&2; exit 1; }
+  bk="$STATE/strata-backup/$(date +%Y%m%d-%H%M%S)"; mkdir -p "$bk"
+  cp strata-*.json run-*.sh "$bk"/; echo "old head $(git rev-parse --short HEAD)" > "$bk/HEAD.txt"
+  echo "backup of configs: $bk"
+  git fetch -q upstream
+  [ "$(git merge-base HEAD upstream/main)" = "$(git rev-parse upstream/main)" ] && echo "already up to date"
+  stop
+  if ! git rebase -q upstream/main; then
+    git rebase --abort
+    echo "our commits on local conflict with upstream: nothing changed. By hand: cd $SRC && git rebase upstream/main" >&2; exit 1
+  fi
+  git branch -f main upstream/main
+  # before update.sh: its `git pull --ff-only` follows origin/local, which must already be the rebased branch
+  git push -q origin main && git push -q --force-with-lease origin local || echo "WARNING: push to the fork failed, continuing" >&2
+  echo "update.sh (engine rebuild can take 10-20 min) ..."
+  ./update.sh
+  echo "re-applying our settings:"; repatch
+  echo "differences against the backup:"; diff -r -q "$bk" . 2>/dev/null | grep -E 'strata-.*json|run-.*sh' || echo "  (none)"
+}
+
+case "${1:-}" in
+  coder) run=run-coder-iq1_m.sh ;;
+  iq2)   run=run-iq2_xs.sh ;;
+  swift) run=run-swift-iq3_s.sh ;;
+  ornith) run=run-ornith-iq4_xs.sh ;;
+  ornith8) run=run-ornith-q8_0.sh ;;
+  stop)  stop; exit 0 ;;
+  status) m=$(current); [ -n "$m" ] && echo "$m" || echo "no server on :$PORT"; exit 0 ;;
+  update-check)
+    cd "$SRC"; git fetch -q upstream
+    echo "installed: $(git log -1 --format='%h %cd' --date=short "$(git merge-base HEAD upstream/main)")   upstream: $(git log -1 --format='%h %cd' --date=short upstream/main)"
+    [ "$(git merge-base HEAD upstream/main)" = "$(git rev-parse upstream/main)" ] && echo "up to date" || echo "update available ($(git rev-list --count HEAD..upstream/main) commits): strata-switch update"
+    exit 0 ;;
+  repatch) echo "checking settings:"; repatch; echo "done"; exit 0 ;;
+  update)
+    case "$(current)" in *coder*) run=run-coder-iq1_m.sh ;; *iq2*) run=run-iq2_xs.sh ;; *swift*) run=run-swift-iq3_s.sh ;; *ornith*iq4*) run=run-ornith-iq4_xs.sh ;; *ornith*) run=run-ornith-q8_0.sh ;; *) run= ;; esac
+    update_src
+    [ -n "$run" ] || { echo "update done; no model was running, none started"; exit 0; } ;;
+  help|-h|--help) cat <<'EOF'
+strata-switch: Strata-Server verwalten (Port 8095)
+
+  strata-switch coder         Coder IQ1_M starten (schneller, fuer Code, mit F16)
+  strata-switch iq2           IQ2_XS starten (allgemeiner, weniger RAM, mit F16)
+  strata-switch swift         Swift 1.5 IQ3_S starten (beste Qualitaet, langsamer, ca. 50-60 GB RAM, 128K)
+  strata-switch ornith        Ornith 1.5 35B-A3B abliterated IQ4_XS (Huihui; Qwen3.6-Pfad, MTP, 128K)
+  strata-switch ornith8       dasselbe als Q8_0 (naeher am Original, 64K, mehr RAM)
+  strata-switch status        zeigt das gerade geladene Modell
+  strata-switch stop          Server stoppen, GPU und RAM freigeben
+  strata-switch update-check  prueft nur, ob es eine neue Version gibt
+  strata-switch update        sichert die Configs, holt die neue Version, baut die Engine
+                              neu (unsere Commits auf Branch local werden auf upstream rebased
+                              und zum Fork gepusht), spielt Port/Kontext/F16 wieder ein,
+                              startet das Modell wieder
+  strata-switch repatch       spielt Port/Kontext/F16 in die Configs ein (z.B. nach setup.sh)
+  strata-switch help          diese Hilfe
+
+Ein laufender Server wird vorher gestoppt. Laden dauert bis ca. 2 min.
+Log: ~/.local/state/strata-server.log   Backups: ~/.local/state/strata-backup/
+Monitor: strata monitor --once   (Web-UI: http://127.0.0.1:8095/)
+EOF
+    exit 0 ;;
+  *) echo "usage: strata-switch coder|iq2|swift|ornith|ornith8|stop|status|update-check|update|repatch|help" >&2; exit 2 ;;
+esac
+
+stop
+if [ -n "$(ss -ltnH "sport = :$PORT")" ]; then
+  echo "port $PORT is already in use by another program:" >&2; ss -ltnpH "sport = :$PORT" >&2; exit 1
+fi
+grep -q "\"--port\" \"$PORT\"" "$SRC/$run" || { echo "$run does not use port $PORT, try: strata-switch repatch" >&2; exit 1; }
+mkdir -p "$(dirname "$LOG")"
+cd "$SRC"
+setsid nohup "./$run" >"$LOG" 2>&1 < /dev/null &
+echo "starting $run (log: $LOG), loading takes about 2 min ..."
+for _ in $(seq 1 60); do
+  sleep 5
+  if curl -s -m 3 "$URL" >/dev/null 2>&1; then
+    echo "ready: $(current | head -1)"
+    exit 0
+  fi
+done
+echo "not ready after 5 min, check $LOG" >&2; exit 1
