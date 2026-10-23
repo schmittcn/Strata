@@ -38,8 +38,22 @@ for p in sorted(glob.glob(f"{src}/strata-*.json")):
     for k in ("args", "args_written"):      # Swift IQ3_S: KV cache in RAM (KV streaming), setup turns it off at 63 GB RAM
         a = c.get(k)
         if a and "swift" in p and "--kv-resident" not in a: a += ["--kv-resident", "32768"]
-    if c.get("arch") == "qwen35moe" and "--expert-vram" not in c["args"]:   # q36 path has no --vram-reserve-mib (see context above)
-        c["args"] += ["--expert-vram", "6.0" if "iq4_xs" in p else "10.0"]
+    if c.get("arch") == "qwen35moe":
+        # Ornith on the q36 path, measured 2026-10-23/24 on this PC (~/strata-bench/NACHT-2026-10-23.md):
+        # --kv q8_0 (our engine commit): KL 0.009 against f32, answers at 30K context 36 -> 61 tok/s;
+        # --mtp 1 with STRATA_Q36_MTP_SAMPLED=1: +15 % sampled / +24 % greedy (2 drafts: +2 % / +10 %);
+        # --expert-vram 14: no cap, the engine takes the VRAM that is free (6.0 left 4 GiB unused with q8_0)
+        def setarg(flag, val):
+            for k in ("args", "args_written"):
+                x = c.get(k)
+                if x is None: continue
+                if flag in x: x[x.index(flag) + 1] = val
+                else: x += [flag, val]
+        setarg("--kv", "q8_0"); setarg("--mtp", "1"); setarg("--expert-vram", "14")
+        c["env"] = c.get("env") or {}
+        c["env"]["STRATA_Q36_MTP_SAMPLED"] = "1"
+        # Ornith's model card instead of the server's Qwen3.6 defaults (presence_penalty 1.5 turned MTP off)
+        c["sampling"] = {"temperature": 0.6, "top_p": 0.95, "top_k": 20, "presence_penalty": 0}
     c.setdefault("env", {})["STRATA_HIP_PROMPT_F16"] = "1"
     if c.get("arch") == "qwen35moe":         # Ornith: prompt projections on the int8 MMQ kernels, 4K +76% / 16K +52% measured
         c["env"]["STRATA_DENSE_MMQ"] = "1"  # (2026-10-23, IQ4_XS 128K; SGEMM +46/+33%, both together no better)

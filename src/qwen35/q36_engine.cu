@@ -264,6 +264,30 @@ __device__ __forceinline__ float kv_get(const void* row, int i, int kvq) {
     if (kvq == 8) return d * (float) (int8_t) b[2 + j];
     return d * (float) ((j < 16 ? b[2 + j] & 15 : b[2 + j - 16] >> 4) - 8);
 }
+/// q . k over a quantized cell row of HD values, block by block (one scale load per 32 values).
+template <int KVQ>
+__device__ __forceinline__ float kv_dot(const float* qs, const uint8_t* kp, int HD) {
+    constexpr int BS = KVQ == 8 ? 34 : 18;
+    float a = 0.f;
+    for (int b = 0; b < HD / 32; ++b) {
+        const uint8_t* blk = kp + b * BS;
+        const float* qb = qs + b * 32;
+        float s = 0.f;
+        if (KVQ == 8) {
+#pragma unroll
+            for (int j = 0; j < 32; ++j) s += qb[j] * (float) (int8_t) blk[2 + j];
+        } else {
+#pragma unroll
+            for (int j = 0; j < 16; ++j) {
+                const int x = blk[2 + j];
+                s += qb[j] * (float) ((x & 15) - 8) + qb[j + 16] * (float) ((x >> 4) - 8);
+            }
+        }
+        a += __half2float(__ushort_as_half(*(const unsigned short*) blk)) * s;
+    }
+    return a;
+}
+
 /// One block of 32 values x into `b`, as ggml's quantize_row_q8_0 / q4_0 (reference) do.
 __device__ inline void kv_put_block(const float* x, uint8_t* b, int kvq) {
     float amax = 0.f, mx = 0.f;
@@ -373,7 +397,7 @@ __global__ void k_attn_part(const float* q, const float* kc, const float* vc, co
             for (int i = 0; i < HD; ++i) a += qs[i] * kp[i];
         } else {
             const uint8_t* kp = (const uint8_t*) kc + ((size_t) kvh * ctx + p) * kv_cell_bytes(kvq, HD);
-            for (int i = 0; i < HD; ++i) a += qs[i] * kv_get(kp, i, kvq);
+            a = kvq == 8 ? kv_dot<8>(qs, kp, HD) : kv_dot<4>(qs, kp, HD);
         }
         s = a * scale;
     }
@@ -387,9 +411,21 @@ __global__ void k_attn_part(const float* q, const float* kc, const float* vc, co
         const float* vp = vc + ((size_t) kvh * ctx + p0) * HD + j;
         for (int k = 0; k < n; ++k) acc += sc[k] * vp[(size_t) k * HD];
     } else {
-        const int cb = kv_cell_bytes(kvq, HD);
-        const uint8_t* vp = (const uint8_t*) vc + ((size_t) kvh * ctx + p0) * cb;
-        for (int k = 0; k < n; ++k) acc += sc[k] * kv_get(vp + (size_t) k * cb, j, kvq);
+        // thread j reads value j of every cell: its block's scale and its byte (q8_0) or nibble (q4_0)
+        const int cb = kv_cell_bytes(kvq, HD), bs = kvq == 8 ? 34 : 18, jj = j & 31;
+        const uint8_t* vp = (const uint8_t*) vc + ((size_t) kvh * ctx + p0) * cb + (j >> 5) * bs;
+        if (kvq == 8) {
+            for (int k = 0; k < n; ++k) {
+                const uint8_t* blk = vp + (size_t) k * cb;
+                acc += sc[k] * __half2float(__ushort_as_half(*(const unsigned short*) blk)) * (float) (int8_t) blk[2 + jj];
+            }
+        } else {
+            const int sh = jj < 16 ? 0 : 4, off = 2 + (jj & 15);
+            for (int k = 0; k < n; ++k) {
+                const uint8_t* blk = vp + (size_t) k * cb;
+                acc += sc[k] * __half2float(__ushort_as_half(*(const unsigned short*) blk)) * (float) (((blk[off] >> sh) & 15) - 8);
+            }
+        }
     }
     const size_t o = (size_t) row * n_chunk + c;
     pacc[o * HD + j] = acc;
@@ -2766,7 +2802,7 @@ struct Engine {
     /// stopped mid-answer leaves the state at the tokens it has shown: a conversation that continues from them (the server's
     /// hand-over of a stopped request to a batch slot) reuses it instead of reading them again.
     int spec_step(int x_tok, const std::vector<int32_t>& fix, int D, std::vector<int32_t>& drafts, int32_t* picks,
-                  const std::atomic<bool>* cancel = nullptr) {
+                  const std::atomic<bool>* cancel = nullptr, const std::function<int(int)>* draw = nullptr) {
         const int N = (int) m->g.n_embd;
         if (main_hybrid) D = std::min<int>(D, (int) (kRebalanceEvery - pos % kRebalanceEvery) - 1);
         const int T0 = (int) fix.size() + 1;   // the redo rows and the row of x
@@ -2816,7 +2852,14 @@ struct Engine {
         CK(cudaMemcpyAsync(hpin + 2, pick, (size_t) T * 4, cudaMemcpyDeviceToHost, st));
         CK(cudaStreamSynchronize(st));
         int a = 0;
-        while (a < D && hpin[2 + a] == drafts[(size_t) a]) ++a;
+        if (draw != nullptr) {   // sampled: row a's own draw replaces its greedy pick; the first draw unlike its draft ends it
+            for (;; ++a) {
+                hpin[2 + a] = (*draw)(a);
+                if (a == D || hpin[2 + a] != drafts[(size_t) a]) break;
+            }
+        } else {
+            while (a < D && hpin[2 + a] == drafts[(size_t) a]) ++a;
+        }
         if (cancel != nullptr && cancel->load()) a = 0;
         for (int i = 0; i <= a; ++i) picks[i] = hpin[2 + i];
         commit(a + 1);
@@ -3647,9 +3690,21 @@ struct Serve {
         const char* finish = "length";
         // greedy requests alone with the MTP block: speculative steps of mtp_d drafts (verified, so the text is the greedy
         // text); sampled ones, and requests beside others, one token at a time
-        const bool spec = E.mtp_d > 0 && !smp.needs_logits() && !adm;
+        // STRATA_Q36_MTP_SAMPLED=1 (opt-in): sampled requests too - each verify row is sampled from its own logits with
+        // the history so far (one draw per emitted token, as without drafts), a draft kept only where it equals the draw,
+        // so the text is the one the same seed gives without MTP
+        static const bool mtp_sampled = [] { const char* v = std::getenv("STRATA_Q36_MTP_SAMPLED"); return v && v[0] == '1'; }();
+        const bool spec = E.mtp_d > 0 && (!smp.needs_logits() || mtp_sampled) && !adm;
         std::vector<int32_t> fix, drafts;
         int32_t picks[16];
+        bool have_nx = false;   // the spec step drew the next token already
+        const std::function<int(int)> draw_row = [&](int r) {
+            for (int i = 0; i < r; ++i) hist.push_back(drafts[(size_t) i]);
+            E.host_logits_row(r, lg);
+            const int t = sample(lg, smp, hist, rng);
+            hist.resize(hist.size() - (size_t) r);
+            return t;
+        };
         int nx = smp.needs_logits() ? -1 : E.greedy();
         if (adm) {
             if (smp.needs_logits()) {
@@ -3686,10 +3741,11 @@ struct Serve {
             return;
         }
         for (;;) {
-            if (smp.needs_logits()) {
+            if (smp.needs_logits() && !have_nx) {
                 E.host_logits(lg);
                 nx = sample(lg, smp, hist, rng);
             }
+            have_nx = false;
             auto emit = [&](int t) {   // false: the answer ends here
                 std::printf("T %d\n", t);
                 std::fflush(stdout);
@@ -3703,7 +3759,8 @@ struct Serve {
             if (!emit(nx)) break;
             if (n_active > 0) window();
             if (spec && n_active == 0 && E.pos + E.mtp_d + 1 <= E.ctx) {
-                const int a = E.spec_step(nx, fix, E.mtp_d, drafts, picks, &stop);
+                const int a = E.spec_step(nx, fix, E.mtp_d, drafts, picks, &stop,
+                                          smp.needs_logits() ? &draw_row : nullptr);
                 offered += E.mtp_d;
                 accepted += a;
                 // the state now holds x and every accepted draft, whether or not the answer ends inside them (an end of
@@ -3718,6 +3775,7 @@ struct Serve {
                     if (!emit(drafts[(size_t) i])) ended = true;
                 if (ended) break;
                 nx = picks[a];
+                have_nx = true;
                 continue;
             }
             if (E.pos + 1 > E.ctx) break;
