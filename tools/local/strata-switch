@@ -1,5 +1,5 @@
 #!/bin/sh
-# strata-switch coder|iq2|swift|ornith|ornith8|stop|status|update-check|update|repatch|help: manage the local Strata server
+# strata-switch coder|iq2|swift|ornith|ornith-q6|stop|status|update-check|update|repatch|help: manage the local Strata server
 set -eu
 SRC="$HOME/Projects/Strata"
 STATE="${XDG_STATE_HOME:-$HOME/.local/state}"
@@ -41,7 +41,9 @@ for p in sorted(glob.glob(f"{src}/strata-*.json")):
     if c.get("arch") == "qwen35moe" and "--expert-vram" not in c["args"]:   # q36 path has no --vram-reserve-mib (see context above)
         c["args"] += ["--expert-vram", "6.0" if "iq4_xs" in p else "10.0"]
     c.setdefault("env", {})["STRATA_HIP_PROMPT_F16"] = "1"
-    if c.get("arch") != "qwen35moe":         # Qwen3.8: FP32 tiled QSA scorer, same selections, +7% at 128K prompts (docs/AMD_HIP.md RDNA2)
+    if c.get("arch") == "qwen35moe":         # Ornith: prompt projections on the int8 MMQ kernels, 4K +76% / 16K +52% measured
+        c["env"]["STRATA_DENSE_MMQ"] = "1"  # (2026-10-23, IQ4_XS 128K; SGEMM +46/+33%, both together no better)
+    else:         # Qwen3.8: FP32 tiled QSA scorer, same selections, +7% at 128K prompts (docs/AMD_HIP.md RDNA2)
         c["env"]["STRATA_SELECT_SIMT"] = "1"
     if "--vram-reserve-mib" not in c["args"] and "--expert-vram" not in c["args"]: print(f"  WARNING {p}: no --vram-reserve-mib (Desktop-Reserve) any more")
     if json.dumps(c, sort_keys=True) != old:
@@ -82,7 +84,7 @@ case "${1:-}" in
   iq2)   run=run-iq2_xs.sh ;;
   swift) run=run-swift-iq3_s.sh ;;
   ornith) run=run-ornith-iq4_xs.sh ;;
-  ornith8) run=run-ornith-q8_0.sh ;;
+  ornith-q6) run=run-ornith-q6_k.sh ;;
   stop)  stop; exit 0 ;;
   status) m=$(current); [ -n "$m" ] && echo "$m" || echo "no server on :$PORT"; exit 0 ;;
   update-check)
@@ -92,7 +94,7 @@ case "${1:-}" in
     exit 0 ;;
   repatch) echo "checking settings:"; repatch; echo "done"; exit 0 ;;
   update)
-    case "$(current)" in *coder*) run=run-coder-iq1_m.sh ;; *iq2*) run=run-iq2_xs.sh ;; *swift*) run=run-swift-iq3_s.sh ;; *ornith*iq4*) run=run-ornith-iq4_xs.sh ;; *ornith*) run=run-ornith-q8_0.sh ;; *) run= ;; esac
+    case "$(current)" in *coder*) run=run-coder-iq1_m.sh ;; *iq2*) run=run-iq2_xs.sh ;; *swift*) run=run-swift-iq3_s.sh ;; *ornith*iq4*) run=run-ornith-iq4_xs.sh ;; *ornith*) run=run-ornith-q6_k.sh ;; *) run= ;; esac
     update_src
     [ -n "$run" ] || { echo "update done; no model was running, none started"; exit 0; } ;;
   help|-h|--help) cat <<'EOF'
@@ -101,8 +103,8 @@ strata-switch: Strata-Server verwalten (Port 8095)
   strata-switch coder         Coder IQ1_M starten (schneller, fuer Code, mit F16)
   strata-switch iq2           IQ2_XS starten (allgemeiner, weniger RAM, mit F16)
   strata-switch swift         Swift 1.5 IQ3_S starten (beste Qualitaet, langsamer, ca. 50-60 GB RAM, 128K)
-  strata-switch ornith        Ornith 1.5 35B-A3B abliterated IQ4_XS (Huihui; Qwen3.6-Pfad, MTP, 128K)
-  strata-switch ornith8       dasselbe als Q8_0 (naeher am Original, 64K, mehr RAM)
+  strata-switch ornith        Ornith 1.5 35B-A3B IQ4_XS (mradermacher i1; Qwen3.6-Pfad, 128K, schnell)
+  strata-switch ornith-q6     Ornith 1.5 35B-A3B Q6_K (offizielles GGUF; 64K, beste Qualitaet)
   strata-switch status        zeigt das gerade geladene Modell
   strata-switch stop          Server stoppen, GPU und RAM freigeben
   strata-switch update-check  prueft nur, ob es eine neue Version gibt
