@@ -34,7 +34,8 @@ for p in sorted(glob.glob(f"{src}/strata-*.json")):
         a = c.get(k) or []
         # Swift IQ3_S: RAM almost full, keep 128K. qwen35moe (Ornith): fp32 KV in VRAM (45 KB/token, 5.5 GiB at 128K),
         # the experts get what is left; 128K is the wanted minimum, 256K would not fit beside the weights
-        if "--max-context" in a: a[a.index("--max-context") + 1] = "131072" if "swift" in p or c.get("arch") == "qwen35moe" else ctx
+        # Ornith IQ4_XS: 256K with KV q8_0 (2.9 GiB) costs ~9 % against 128K (answers 96 / 105 tok/s, agent 80 / 88)
+        if "--max-context" in a: a[a.index("--max-context") + 1] = "262144" if "iq4_xs" in p else "131072" if "swift" in p or c.get("arch") == "qwen35moe" else ctx
     for k in ("args", "args_written"):      # Swift IQ3_S: KV cache in RAM (KV streaming), setup turns it off at 63 GB RAM
         a = c.get(k)
         if a and "swift" in p and "--kv-resident" not in a: a += ["--kv-resident", "32768"]
@@ -117,7 +118,7 @@ strata-switch: Strata-Server verwalten (Port 8095)
   strata-switch coder         Coder IQ1_M starten (schneller, fuer Code, mit F16)
   strata-switch iq2           IQ2_XS starten (allgemeiner, weniger RAM, mit F16)
   strata-switch swift         Swift 1.5 IQ3_S starten (beste Qualitaet, langsamer, ca. 50-60 GB RAM, 128K)
-  strata-switch ornith        Ornith 1.5 35B-A3B IQ4_XS (mradermacher i1; Qwen3.6-Pfad, 128K, schnell)
+  strata-switch ornith        Ornith 1.5 35B-A3B IQ4_XS (mradermacher i1; Qwen3.6-Pfad, 256K, schnell)
   strata-switch ornith-q6     Ornith 1.5 35B-A3B Q6_K (offizielles GGUF; 128K, beste Qualitaet, langsamer)
   strata-switch status        zeigt das gerade geladene Modell
   strata-switch stop          Server stoppen, GPU und RAM freigeben
