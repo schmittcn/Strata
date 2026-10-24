@@ -121,8 +121,8 @@ class InstallOwnPath(unittest.TestCase):
             p.start()
             self.addCleanup(p.stop)
 
-    def install(self, ram=64.0, vram=16.0, hip=False, **kw):
-        gpu = {"index": 0, "count": 1, "vram_gb": vram, "name": "Test GPU"}
+    def install(self, ram=64.0, vram=16.0, hip=False, arch=None, **kw):
+        gpu = {"index": 0, "count": 1, "vram_gb": vram, "name": "Test GPU", **({"arch": arch} if arch else {})}
         return run(setup.install_own_path, args(models_dir=str(self.root / "models"), **kw), "qwen36", gpu, hip, [],
                    13, [], 8080, ram, None)
 
@@ -150,6 +150,13 @@ class InstallOwnPath(unittest.TestCase):
         self.assertEqual(self.cfg["model_name"], "qwen3.6-35b-a3b-ud-q4_k_xl")
         self.assertEqual(Path(self.cfg["exe"]).parent, self.root / "engine")
         self.assertIn(("config", "strata-qwen36-ud-q4_k_xl.json"), self.calls)
+
+    def test_dense_mmq_on_gfx1030_only(self):
+        for arch, hip, want in (("gfx1030", True, {"STRATA_DENSE_MMQ": "1"}), ("gfx1031", True, None),
+                                ("gfx1100", True, None), (None, False, None)):
+            rc, out = self.install(model="UD-Q4_K_XL", vision="no", hip=hip, arch=arch)
+            self.assertEqual(rc, 0, out)
+            self.assertEqual(self.cfg.get("env"), want, arch)
 
     def test_default_size_follows_the_ram(self):
         rc, out = self.install(ram=64.0)

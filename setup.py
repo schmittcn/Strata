@@ -7679,6 +7679,12 @@ def install_own_path(a, family, gpu, hip, amd, cuda_tk, multi, port, ram, adopte
         cfg["cuda"] = 12
     if hip:
         cfg["backend"] = "hip"
+        if gfx_arch_is(gpu.get("arch"), "gfx1030"):
+            # RX 6800 / 6900: the prompt's dense projections through the int8 MMQ kernels (#820) instead of dequantize +
+            # rocBLAS.  On an RX 6900 XT (Qwen3.6-35B-A3B UD-Q4_K_XL, 128K) 4K / 16K prompts read 67% / 47% faster;
+            # the text is not bit-identical (q8_1 activations): mean KL 0.0033 against the default over a 30K-token
+            # prompt, the same top-1 token in 98% of the steps.
+            cfg["env"] = {"STRATA_DENSE_MMQ": "1"}
     if gpu.get("count", 1) > 1 or a.gpu is not None:
         cfg["gpu"] = gpu["index"]
         cfg["gpus_asked"] = True

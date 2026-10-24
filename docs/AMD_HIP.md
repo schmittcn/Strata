@@ -338,12 +338,15 @@ compositor fails with "Failed to pin framebuffer with error -12".
 The installer supports this backend (see "Install with setup" above). Pictures are on by default. They are read on the CPU (`strata-vision`) under 24 GB of VRAM and on the card (`strata-vision-hip`) from 24 GB, the same rule as on NVIDIA; if the engine has no card reader, or it cannot start, the CPU reader is used.
 Setup installs one AMD card, or several with `--gpus` (the engine's layer split; see RDNA4 below).
 
-**Opt-in switches for RDNA2 prompts and hangs (0.1.40, off by default):** `STRATA_DENSE_MMQ=1` (#820, HIP) runs the
-prompt's dense GGUF projections through the int8 MMQ kernels instead of dequantize + hipBLAS: on the RX 6900 XT a 4K
-prompt read 436 -> 757 tok/s (greedy text diverges from the default after a few dozen tokens: the q8_1 activation
-rounding). `STRATA_HIP_ADAPT_KERNEL_COPY=1` (#884) copies the adaptive tier's swaps with a kernel instead of the SDMA
-engine, a workaround for the gfx1030 hang seen with the MMQ prompt path and adaptive swaps (untested on the reporter's
-machine). Windows HIP: the doorbell kernels fence their store (#697), and the shared-expert fork is off on HIP (#816).
+**Opt-in switches for RDNA2 prompts and hangs (0.1.40, off by default except as below):** `STRATA_DENSE_MMQ=1` (#820,
+HIP) runs the prompt's dense GGUF projections through the int8 MMQ kernels instead of dequantize + hipBLAS: on the RX
+6900 XT a 4K prompt read 436 -> 757 tok/s (greedy text diverges from the default after a few dozen tokens: the q8_1
+activation rounding). Setup writes it into the config of the Qwen3.6 path (GGUF architecture qwen35moe) on gfx1030:
+there a 4K / 16K prompt read 1379 -> 2301 / 1091 -> 1599 tok/s on an RX 6900 XT (Qwen3.6-35B-A3B UD-Q4_K_XL, 128K), at
+a mean KL of 0.0033 against the default over a 30K-token prompt. `STRATA_HIP_ADAPT_KERNEL_COPY=1` (#884) copies the
+adaptive tier's swaps with a kernel instead of the SDMA engine, a workaround for the gfx1030 hang seen with the MMQ
+prompt path and adaptive swaps (untested on the reporter's machine). Windows HIP: the doorbell kernels fence their
+store (#697), and the shared-expert fork is off on HIP (#816).
 
 **The shared-expert stream fork (`STRATA_SH_STREAM`):** it is off by default on HIP, except for the gfx1151 table, and
 that default stays. The measurements disagree by platform. 2x RX 6900 XT on Linux (#1272): turning it off costs 5-13%
