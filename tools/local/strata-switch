@@ -1,7 +1,7 @@
 #!/bin/sh
 # strata-switch coder|iq2|swift|ornith|ornith-q6|stop|status|update-check|update|repatch|help: manage the local Strata server
 set -eu
-SRC="$HOME/Projects/Strata"
+SRC="$(cd "$(dirname "$(readlink -f "$0")")/../.." && pwd)"
 STATE="${XDG_STATE_HOME:-$HOME/.local/state}"
 LOG="$STATE/strata-server.log"
 PORT=8095      # muss zu baseURL in opencode.json passen
@@ -40,7 +40,7 @@ for p in sorted(glob.glob(f"{src}/strata-*.json")):
         a = c.get(k)
         if a and "swift" in p and "--kv-resident" not in a: a += ["--kv-resident", "32768"]
     if c.get("arch") == "qwen35moe":
-        # Ornith on the q36 path, measured 2026-10-23/24 on this PC (~/strata-bench/NACHT-2026-10-23.md):
+        # Ornith on the q36 path, measured 2026-10-23/24 on this PC (~/LLM/strata-bench/NACHT-2026-10-23.md):
         # --kv q8_0 (our engine commit): KL 0.009 against f32, answers at 30K context 36 -> 61 tok/s;
         # --mtp 1 with STRATA_Q36_MTP_SAMPLED=1: +15 % sampled / +24 % greedy (2 drafts: +2 % / +10 %);
         # --expert-vram 14: no cap, the engine takes the VRAM that is free (6.0 left 4 GiB unused with q8_0)
