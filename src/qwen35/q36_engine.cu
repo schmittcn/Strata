@@ -262,6 +262,30 @@ __device__ __forceinline__ float kv_get(const void* row, int i, int kvq) {
     if (kvq == 8) return d * (float) (int8_t) b[2 + j];
     return d * (float) ((j < 16 ? b[2 + j] & 15 : b[2 + j - 16] >> 4) - 8);
 }
+/// q . k over a quantized cell row of HD values, block by block (one scale load per 32 values).
+template <int KVQ>
+__device__ __forceinline__ float kv_dot(const float* qs, const uint8_t* kp, int HD) {
+    constexpr int BS = KVQ == 8 ? 34 : 18;
+    float a = 0.f;
+    for (int b = 0; b < HD / 32; ++b) {
+        const uint8_t* blk = kp + b * BS;
+        const float* qb = qs + b * 32;
+        float s = 0.f;
+        if (KVQ == 8) {
+#pragma unroll
+            for (int j = 0; j < 32; ++j) s += qb[j] * (float) (int8_t) blk[2 + j];
+        } else {
+#pragma unroll
+            for (int j = 0; j < 16; ++j) {
+                const int x = blk[2 + j];
+                s += qb[j] * (float) ((x & 15) - 8) + qb[j + 16] * (float) ((x >> 4) - 8);
+            }
+        }
+        a += __half2float(__ushort_as_half(*(const unsigned short*) blk)) * s;
+    }
+    return a;
+}
+
 /// One block of 32 values x into `b`, as ggml's quantize_row_q8_0 / q4_0 (reference) do.
 __device__ inline void kv_put_block(const float* x, uint8_t* b, int kvq) {
     float amax = 0.f, mx = 0.f;
@@ -371,7 +395,7 @@ __global__ void k_attn_part(const float* q, const float* kc, const float* vc, co
             for (int i = 0; i < HD; ++i) a += qs[i] * kp[i];
         } else {
             const uint8_t* kp = (const uint8_t*) kc + ((size_t) kvh * ctx + p) * kv_cell_bytes(kvq, HD);
-            for (int i = 0; i < HD; ++i) a += qs[i] * kv_get(kp, i, kvq);
+            a = kvq == 8 ? kv_dot<8>(qs, kp, HD) : kv_dot<4>(qs, kp, HD);
         }
         s = a * scale;
     }
@@ -385,9 +409,21 @@ __global__ void k_attn_part(const float* q, const float* kc, const float* vc, co
         const float* vp = vc + ((size_t) kvh * ctx + p0) * HD + j;
         for (int k = 0; k < n; ++k) acc += sc[k] * vp[(size_t) k * HD];
     } else {
-        const int cb = kv_cell_bytes(kvq, HD);
-        const uint8_t* vp = (const uint8_t*) vc + ((size_t) kvh * ctx + p0) * cb;
-        for (int k = 0; k < n; ++k) acc += sc[k] * kv_get(vp + (size_t) k * cb, j, kvq);
+        // thread j reads value j of every cell: its block's scale and its byte (q8_0) or nibble (q4_0)
+        const int cb = kv_cell_bytes(kvq, HD), bs = kvq == 8 ? 34 : 18, jj = j & 31;
+        const uint8_t* vp = (const uint8_t*) vc + ((size_t) kvh * ctx + p0) * cb + (j >> 5) * bs;
+        if (kvq == 8) {
+            for (int k = 0; k < n; ++k) {
+                const uint8_t* blk = vp + (size_t) k * cb;
+                acc += sc[k] * __half2float(__ushort_as_half(*(const unsigned short*) blk)) * (float) (int8_t) blk[2 + jj];
+            }
+        } else {
+            const int sh = jj < 16 ? 0 : 4, off = 2 + (jj & 15);
+            for (int k = 0; k < n; ++k) {
+                const uint8_t* blk = vp + (size_t) k * cb;
+                acc += sc[k] * __half2float(__ushort_as_half(*(const unsigned short*) blk)) * (float) (((blk[off] >> sh) & 15) - 8);
+            }
+        }
     }
     const size_t o = (size_t) row * n_chunk + c;
     pacc[o * HD + j] = acc;
