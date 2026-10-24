@@ -135,7 +135,7 @@ Log: ~/.local/state/strata-server.log   Backups: ~/.local/state/strata-backup/
 Monitor: strata monitor --once   (Web-UI: http://127.0.0.1:8095/)
 EOF
     exit 0 ;;
-  *) echo "usage: strata-switch coder|iq2|swift|ornith|ornith8|stop|status|update-check|update|repatch|help" >&2; exit 2 ;;
+  *) echo "usage: strata-switch coder|iq2|swift|ornith|ornith-q6|stop|status|update-check|update|repatch|help" >&2; exit 2 ;;
 esac
 
 stop
