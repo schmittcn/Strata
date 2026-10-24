@@ -22,7 +22,7 @@ current() { curl -s -m 3 "$URL" | python3 -c 'import sys,json; print("\n".join(m
 # our settings on top of what setup/update writes: port, context, F16, KV streaming (Swift)
 repatch() {
   python3 - "$SRC" "$PORT" "$CTX" <<'E'
-import glob, json, re, sys
+import glob, json, os, re, sys
 src, port, ctx = sys.argv[1], int(sys.argv[2]), sys.argv[3]
 for p in sorted(glob.glob(f"{src}/strata-*.json")):
     try: c = json.load(open(p))
@@ -55,6 +55,13 @@ for p in sorted(glob.glob(f"{src}/strata-*.json")):
         c["env"]["STRATA_Q36_MTP_SAMPLED"] = "1"
         # Ornith's model card instead of the server's Qwen3.6 defaults (presence_penalty 1.5 turned MTP off)
         c["sampling"] = {"temperature": 0.6, "top_p": 0.95, "top_k": 20, "presence_penalty": 0}
+        # pictures: setup does not know Ornith, so its encoder (mradermacher's mmproj-f16, beside the models) is set here;
+        # the CPU reader like setup on a 16 GB card (no VRAM taken from the experts)
+        g = c["args"][c["args"].index("--native") + 1]
+        mm = os.path.join(os.path.dirname(os.path.dirname(g)), "ornith-mmproj", "Ornith-1.5-35B-A3B.mmproj-f16.gguf")
+        vx = f"{src}/engine/strata-vision"
+        if "ornith" in g.lower() and os.path.isfile(mm) and os.path.isfile(vx):
+            c["vision"] = {"exe": vx, "mmproj": mm, "model": g, "gpu": False, "max_tokens": 300, "threads": 16}
     c.setdefault("env", {})["STRATA_HIP_PROMPT_F16"] = "1"
     if c.get("arch") == "qwen35moe":         # Ornith: prompt projections on the int8 MMQ kernels, 4K +76% / 16K +52% measured
         c["env"]["STRATA_DENSE_MMQ"] = "1"  # (2026-10-23, IQ4_XS 128K; SGEMM +46/+33%, both together no better)
