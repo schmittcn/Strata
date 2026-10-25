@@ -80,7 +80,7 @@ strata-switch: manage the local Strata server (port 8095)
 
 A running server is stopped first. Loading takes up to about 2 min.
 Settings: ~/.config/strata/patches.json   Patched configs: ~/.config/strata/configs/
-Log: ~/.local/state/strata/runtime/<model id>.server.log   Backups: ~/.local/state/strata-backup/
+Log: ~/.local/state/strata/runtime/omarchy-<model id>.server.log   Backups: ~/.local/state/strata-backup/
 Monitor: strata monitor --once   (web UI: http://127.0.0.1:8095/)
 EOF
     exit 0 ;;
