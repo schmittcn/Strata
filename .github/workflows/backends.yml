@@ -181,6 +181,7 @@ jobs:
   metal:
     name: Metal strata + strata_ds4
     # the macOS 26 SDK: metal/src/mtl_rt.mm names MTLGPUFamilyMetal4 behind @available (a run-time check); the names must be in the SDK
+    if: ${{ !github.event.repository.fork }}  # forks have no macOS runner; PRs run in the base repo, so upstream still checks them
     runs-on: macos-26
     timeout-minutes: 60
     env:
