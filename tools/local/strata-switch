@@ -31,9 +31,18 @@ update_src() {
     git rebase --abort
     echo "our commits on local conflict with upstream: nothing changed. By hand: cd $SRC && git rebase upstream/main" >&2; exit 1
   fi
-  git branch -f main upstream/main
+  # fork main = upstream/main + fork-only commits (e.g. the CI fork skip; workflows run on pushes to main only)
+  git fetch -q origin
+  git checkout -q -B main origin/main
+  if ! git rebase -q upstream/main; then
+    git rebase --abort; git checkout -q -B main upstream/main
+    echo "WARNING: fork-only commits on origin/main conflict with upstream, main not pushed (git log upstream/main..origin/main)" >&2
+  else
+    git push -q --force-with-lease=main:origin/main origin main || echo "WARNING: push of main to the fork failed" >&2
+  fi
+  git checkout -q local
   # before update.sh: its `git pull --ff-only` follows origin/local, which must already be the rebased branch
-  git push -q origin main && git push -q --force-with-lease origin local || echo "WARNING: push to the fork failed, continuing" >&2
+  git push -q --force-with-lease origin local || echo "WARNING: push of local to the fork failed, continuing" >&2
   echo "update.sh (engine rebuild can take 10-20 min) ..."
   ./update.sh
   echo "configs setup changed:"; diff -r -q "$bk" . 2>/dev/null | grep -E 'strata-.*json' || echo "  (none)"
