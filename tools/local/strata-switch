@@ -44,7 +44,7 @@ update_src() {
   # before update.sh: its `git pull --ff-only` follows origin/local, which must already be the rebased branch
   git push -q --force-with-lease origin local || echo "WARNING: push of local to the fork failed, continuing" >&2
   echo "update.sh (engine rebuild can take 10-20 min) ..."
-  ./update.sh
+  ./update.sh || { echo "update.sh failed (reason above): engine not rebuilt, settings not re-applied" >&2; exit 1; }
   echo "configs setup changed:"; diff -r -q "$bk" . 2>/dev/null | grep -E 'strata-.*json' || echo "  (none)"
   echo "re-applying our settings:"; strata-profiles apply
 }
