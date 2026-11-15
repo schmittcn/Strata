@@ -82,7 +82,12 @@ class KeepAwakeTests(unittest.TestCase):
         svc = Service(MockEngine(tok, "ok"), tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
         rec = Recorder()
         svc.keep_awake = ka = KeepAwake(rec)
-        kinds = [k for k, _ in svc.run(tok.encode("hi"), False, None, 8, {}, threading.Event())]
+        gen = svc.run(tok.encode("hi"), False, None, 8, {}, threading.Event())
+        kinds = [next(gen)[0]]
+        # held open until the keep-awake thread has set ON: a request that ends before that thread is scheduled is
+        # (correctly) never held, which made this flaky on a busy runner
+        self.assertTrue(wait_for(lambda: rec.calls == [ON]))
+        kinds += [k for k, _ in gen]
         self.assertIn("done", kinds)
         self.assertTrue(wait_for(lambda: rec.calls == [ON, ES_CONTINUOUS]))
         gen = svc.run(tok.encode("hi"), False, None, 8, {}, threading.Event())
