@@ -5159,7 +5159,9 @@ def build_engine_hip(gpu, llama, vision="none") -> Path:
     cmake_build(ROOT, ROOT / "build-hip", "strata",
                 ["-DSTRATA_ENABLE_HIP=ON", "-DSTRATA_ENABLE_CUDA=OFF", "-DSTRATA_BUILD_TESTS=OFF",
                  "-DSTRATA_PREFILL_MMQ=ON", "-DSTRATA_Q6K_EXPERTS=ON", "-DSTRATA_MMQ_KQUANTS=ON", "-DCMAKE_HIP_ARCHITECTURES=" + ";".join(archs),
-                 "-DSTRATA_MMQ=OFF",   # without llama.cpp's MMQ, also in a build folder configured before (its cache says ON)
+                 # fork: keep llama.cpp's MMQ (upstream builds without it since 0.2.14). On the RX 6900 XT (gfx1030) STRATA_DENSE_MMQ gave
+                 # Qwen3.6/Ornith prompts +47-67% (#3926, 2026-11-06); without MMQ that setting does nothing.
+                 "-DSTRATA_MMQ=ON",
                  f"-DCMAKE_HIP_COMPILER={root / 'llvm' / 'bin' / 'clang++'}", f"-DCMAKE_HIP_COMPILER_ROCM_ROOT={root}",
                  "-DCMAKE_PREFIX_PATH=" + ";".join([str(root), *libs]),
                  f"-DCMAKE_HIP_FLAGS=--rocm-path={root} --rocm-device-lib-path={bitcode}",
