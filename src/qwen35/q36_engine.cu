@@ -1650,11 +1650,12 @@ struct Engine {
         }
         sess.resize((size_t) n_sess);
         gsets.resize((size_t) n_sess);
-        {   // the sessions' caches: said before they fail (a slot's K / V at the context, fp32, for the attention layers and
-            // the MTP block, and its recurrent state)
+        {   // the sessions' caches: said before they fail (a slot's K / V at the context, in --kv's cell format as alloc_session
+            // allocates it, for the attention layers and the MTP block, and its recurrent state)
             size_t n_attn = m->has_mtp ? 1 : 0, n_gdn = 0;
             for (const Layer& L : m->layers) (L.attn ? n_attn : n_gdn) += 1;
-            const size_t per = (size_t) (g.n_head_kv * g.head_dim * 2 * 4) * (size_t) ctx * n_attn +
+            const size_t kv_tok = (size_t) g.n_head_kv * kv_cell_bytes(kvq, (int) g.head_dim) * 2 * n_attn;
+            const size_t per = kv_tok * (size_t) ctx +
                                (size_t) g.ssm_v_heads * g.ssm_state_size * g.ssm_state_size * 4 * n_gdn;
             size_t fr0 = 0, tot0 = 0;
             CK(cudaMemGetInfo(&fr0, &tot0));
@@ -1670,7 +1671,6 @@ struct Engine {
             }
             if (n_sess == 1) {   // #5715: one session whose context cannot fit, said in words before the allocation fails
                 const size_t shared_tok = (size_t) g.n_head_kv * g.head_dim * 2 * 2;   // the fp16 K / V copy (k16 / v16 above)
-                const size_t kv_tok = (size_t) (g.n_head_kv * g.head_dim * 2 * 4) * n_attn;
                 const size_t ne = (size_t) g.n_expert;
                 size_t total_main = 0, max_layer = 0, packed = 0;
                 for (const Layer& L : m->layers) {

@@ -21,7 +21,7 @@ namespace strata::qwen35 {
 
 struct OneSessionInput {
     size_t ctx;            // --max-context
-    size_t kv_tok;         // the session's fp32 K / V per token (the attention layers and the MTP block)
+    size_t kv_tok;         // the session's K / V per token in --kv's cell format (fp32 by default; the attention layers and the MTP block)
     size_t shared_tok;     // the fp16 K / V copy per token (already allocated, inside fr0)
     size_t state;          // the session's recurrent state
     size_t fr0;            // free VRAM before the session
