@@ -9,27 +9,27 @@ URL=http://127.0.0.1:$PORT/v1/models
 # models run as `strata runtime` profiles; our settings live in ~/.config/strata/patches.json and are applied by
 # strata-profiles (from the Omarchy Strata plugin, linked into ~/.local/bin). This checkout's own CLI is used, so the
 # runtime serves this checkout's server code and engine, not the ones of the installed Strata Terminal.
-export STRATA_CLI="env STRATA_PYTHON=$SRC/.venv/bin/python $SRC/bin/strata"
+export STRATA_CLI="env STRATA_PYTHON=$SRC/terminal/.venv/bin/python $SRC/terminal/bin/strata"   # 0.2.16 layout: the Terminal lives in terminal/
 command -v strata-profiles >/dev/null || { echo "strata-profiles not found: ln -s <plugin dir>/strata-profiles.py ~/.local/bin/strata-profiles" >&2; exit 1; }
 
 current() { curl -s -m 3 "$URL" | python3 -c 'import sys,json; print("\n".join(m["id"] for m in json.load(sys.stdin)["data"]))' 2>/dev/null || true; }
 running_id() { strata-profiles info | python3 -c 'import sys,json; print(next((m["id"] for m in json.load(sys.stdin)["models"] if m["state"] != "stopped"), ""))'; }
 
 # our changes are commits on branch `local` (fork: origin = schmittcn/Strata, upstream = Niko1221/Strata);
-# an update rebases them onto upstream/main, pushes both branches to the fork and rebuilds the engine
+# an update merges upstream/main into local (a rebase would replay commits already resolved in a merge), pushes both branches to the fork and rebuilds the engine
 update_src() {
   cd "$SRC"
   [ "$(git branch --show-current)" = local ] || { echo "$SRC is not on branch local, nothing touched" >&2; exit 1; }
   [ -z "$(git status --porcelain --untracked-files=no)" ] || { echo "uncommitted changes in $SRC, commit them on local first (git status)" >&2; exit 1; }
   bk="$STATE/strata-backup/$(date +%Y%m%d-%H%M%S)"; mkdir -p "$bk"
-  cp strata-*.json "$bk"/; echo "old head $(git rev-parse --short HEAD)" > "$bk/HEAD.txt"
+  cp terminal/strata-*.json "$bk"/ 2>/dev/null || true; echo "old head $(git rev-parse --short HEAD)" > "$bk/HEAD.txt"
   echo "backup of configs: $bk"
   git fetch -q upstream
   [ "$(git merge-base HEAD upstream/main)" = "$(git rev-parse upstream/main)" ] && echo "already up to date"
   strata-profiles stop
-  if ! git rebase -q upstream/main; then
-    git rebase --abort
-    echo "our commits on local conflict with upstream: nothing changed. By hand: cd $SRC && git rebase upstream/main" >&2; exit 1
+  if ! git merge -q --no-edit upstream/main; then
+    git merge --abort
+    echo "our commits on local conflict with upstream: nothing changed. By hand: cd $SRC && git merge upstream/main" >&2; exit 1
   fi
   # fork main = upstream/main + fork-only commits (e.g. the CI fork skip; workflows run on pushes to main only)
   git fetch -q origin
@@ -41,11 +41,11 @@ update_src() {
     git push -q --force-with-lease=main:origin/main origin main || echo "WARNING: push of main to the fork failed" >&2
   fi
   git checkout -q local
-  # before update.sh: its `git pull --ff-only` follows origin/local, which must already be the rebased branch
+  # before setup.sh --update: its `git pull --ff-only` follows origin/local, which must already be the merged branch
   git push -q --force-with-lease origin local || echo "WARNING: push of local to the fork failed, continuing" >&2
-  echo "update.sh (engine rebuild can take 10-20 min) ..."
-  ./update.sh || { echo "update.sh failed (reason above): engine not rebuilt, settings not re-applied" >&2; exit 1; }
-  echo "configs setup changed:"; diff -r -q "$bk" . 2>/dev/null | grep -E 'strata-.*json' || echo "  (none)"
+  echo "setup.sh --update (engine rebuild can take 10-20 min) ..."
+  ./setup.sh --update || { echo "setup.sh --update failed (reason above): engine not rebuilt, settings not re-applied" >&2; exit 1; }
+  echo "configs setup changed:"; diff -r -q "$bk" terminal 2>/dev/null | grep -E 'strata-.*json' || echo "  (none)"
   echo "re-applying our settings:"; strata-profiles apply
 }
 
@@ -81,7 +81,7 @@ strata-switch: manage the local Strata server (port 8095)
   strata-switch stop          stop the server, free GPU and RAM
   strata-switch update-check  only check whether there is a new version
   strata-switch update        back up the configs, fetch the new version, rebuild the engine (our commits on
-                              branch local are rebased onto upstream and pushed to the fork), re-apply our
+                              branch local get upstream merged in and pushed to the fork), re-apply our
                               settings, start the model again
   strata-switch apply         re-apply our settings (~/.config/strata/patches.json) to the profiles
   strata-switch edit          edit our settings, then apply them
