@@ -21,7 +21,7 @@ namespace strata::qwen35 {
 
 struct OneSessionInput {
     size_t ctx;            // --max-context
-    size_t kv_tok;         // the session's K / V per token in --kv's cell format (fp32 by default; the attention layers and the MTP block)
+    size_t kv_tok;         // the session's fp32 K / V per token (the attention layers and the MTP block)
     size_t shared_tok;     // the fp16 K / V copy per token (already allocated, inside fr0)
     size_t state;          // the session's recurrent state
     size_t fr0;            // free VRAM before the session
@@ -30,6 +30,7 @@ struct OneSessionInput {
     size_t att_save;       // what shrinking the attention scores buffer gives back
     size_t staging;        // the hybrid mode's staging pair (0 without the MMQ prompt path)
     size_t outputs;        // the hybrid mode's CPU part outputs (T x top_k x n_embd floats + T x top_k)
+    size_t headroom = 0;   // optional driver / pinned-mapping / slot-table headroom (e.g. --peer-device)
 };
 
 struct OneSessionFit {
@@ -52,7 +53,7 @@ inline OneSessionFit one_session_fit(const OneSessionInput& in) {
     const size_t after = in.fr0 > session ? in.fr0 - session : 0;
     // every main layer's experts could still fit (the all-in-VRAM or MTP-on-CPU placements): no hybrid minimum is asked here
     const bool hybrid = in.total_main + ((size_t) 64 << 20) > after + in.packed + in.att_save;
-    const size_t floor = hybrid ? in.staging + in.outputs : 0;
+    const size_t floor = hybrid ? in.staging + in.outputs + in.headroom : 0;
     const size_t shared = in.shared_tok * in.ctx;
     const double GiB = (double) (1ull << 30);
     f.x_gib = (double) (session + shared) / GiB;

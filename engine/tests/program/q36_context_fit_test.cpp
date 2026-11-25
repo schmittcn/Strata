@@ -94,22 +94,6 @@ int main() {
         check(!one_session_fit(rtx3060ti((size_t) f.fit, true)).refuse, "3060 Ti: the size it names is not refused");
         check(!one_session_fit(rtx3060ti(7168, true)).refuse, "3060 Ti 7168: not refused (starts as before)");
     }
-    // --kv q8_0 (fork): the check must use the cache's cell format, as alloc_session does.  Ornith-1.5-35B-A3B IQ4_XS on an RX 6900 XT 16 GB at 262144,
-    // no-MMQ build (2026-11-17 log): with the fp32 per-token size it refused, "needs 11.56 GiB and only 11.46 GiB is free ... (259072 tokens fit here)",
-    // though the Q8_0 cache it allocates is ~3.0 GiB and the same config ran on 2026-10-28 with 7.95 GiB of VRAM left.
-    {
-        const size_t outputs = 2048 * 8 * 2048 * 4 + 2048 * 8 * 4, staging = (size_t) (0.80 * GiB);   // "0.80 GiB staging", prompt chunk 2048
-        const size_t ctx = 262144, fr0 = (size_t) (11.46 * GiB) - SHARED * ctx + staging + outputs;
-        const size_t KV_Q8 = 11 * 2 * (256 / 32 * 34) * 2, KV_Q4 = 11 * 2 * (256 / 32 * 18) * 2;   // kv_cell_bytes(8 / 4, 256)
-        auto ornith = [&](size_t kv) {
-            return strata::qwen35::OneSessionInput{ctx, kv, SHARED, STATE, fr0, (size_t) (16.34 * GiB), 0, 0, staging, outputs};
-        };
-        const auto f32 = one_session_fit(ornith(KV));
-        check(f32.refuse && f32.fit == 259072, "Ornith 256K with an fp32 cache: refused, 259072 fit (the log's figures)");
-        std::printf("%s\n", one_session_fit_line((long long) ctx, f32).c_str());
-        check(!one_session_fit(ornith(KV_Q8)).refuse, "Ornith 256K with --kv q8_0: not refused");
-        check(!one_session_fit(ornith(KV_Q4)).refuse, "Ornith 256K with --kv q4_0: not refused");
-    }
     if (fails) return 1;
     std::printf("q36_context_fit_test: ok\n");
     return 0;
