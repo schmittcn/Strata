@@ -6,6 +6,7 @@
 #pragma once
 
 #include "ink_hip_codecs.hip.h"
+#include "../cuda/ink_tail_skip.cuh"
 
 namespace strata::inkling2::hip {
 
@@ -1810,6 +1811,146 @@ __global__ void __launch_bounds__(128) k3_flash_swa_gqa(
     *reinterpret_cast<float4*>(O_out + (static_cast<size_t>(m) * n_q_heads + qh) * 128 + d0) = make_float4(o0, o1, o2, o3);
 }
 
+// Query-tiled Flash-SWA / Flash-GQA for prompt chunks of one slot (no WMMA: RDNA2). Same math as k3_flash_swa_gqa
+// (sinks, rel bias, SWA ring, paged FP16/FP8 KV, sigmoid gate); only the summation order differs.
+// One block = one Q head x 8 consecutive queries (one wave each). K/V tiles of 32 positions are loaded once into LDS
+// and shared by the 8 queries; lane j scores key j with a full 128-dim dot product (no cross-lane reduce per key),
+// then one max/sum per tile and a 32-key P.V update of the lane's 4 dims.
+// Grid: (n_q_heads, (M + 7) / 8), Block: 256
+template <bool FP8_KV>
+__global__ void __launch_bounds__(256) k3_flash_swa_gqa_qtile(
+    const float* __restrict__ Q, const float* __restrict__ gate_attn, const float* __restrict__ rel_bias,
+    const float* __restrict__ sink_logit, const int32_t* __restrict__ slot_ids, const int32_t* __restrict__ pos,
+    const int32_t* __restrict__ page_table, int max_pages_per_slot,
+    const void* __restrict__ k_pool, const void* __restrict__ v_pool,
+    const float* __restrict__ k_scales, const float* __restrict__ v_scales,
+    float* __restrict__ O_out, int M, int n_q_heads, int n_kv_heads, int swa_window, int swa_ring, int max_rel) {
+    constexpr int QB = 8, KT = 32, HD = 128, KS2 = HD / 2 + 1;   // K rows as half2, padded: lane j's row starts in bank j
+    __shared__ uint32_t sK[KT * KS2];
+    __shared__ uint2 sV[KT * (HD / 4)];
+    __shared__ uint32_t sQ[QB][HD / 2];
+    __shared__ float sP[QB][KT];
+
+    const int tid = threadIdx.x;
+    const int wave = tid >> 5;
+    const int lane = tid & 31;
+    const int qh = blockIdx.x;
+    const int m0 = blockIdx.y * QB;
+    const int m = m0 + wave;
+    const bool active = m < M;
+    const int m_last = min(m0 + QB, M) - 1;
+    const int kvh = qh / (n_q_heads / n_kv_heads);
+    const int slot = slot_ids[m0];
+    const int32_t* pt_row = page_table + slot * max_pages_per_slot;
+    const int elems = n_kv_heads * HD;
+    const float scale = rsqrtf(128.0f);
+
+    const int cur_pos = active ? pos[m] : -1;
+    const int k_start = (active && swa_window > 0 && cur_pos >= swa_window) ? (cur_pos - swa_window + 1) : 0;
+    const int pos_first = pos[m0];
+    const int blk_lo = (swa_window > 0 && pos_first >= swa_window) ? (pos_first - swa_window + 1) : 0;
+    const int blk_hi = pos[m_last];
+
+    if (active) {
+        const float4 qv = *reinterpret_cast<const float4*>(Q + (static_cast<size_t>(m) * n_q_heads + qh) * HD + lane * 4);
+        const hv2 qa = {static_cast<half_t>(qv.x * scale), static_cast<half_t>(qv.y * scale)};
+        const hv2 qb = {static_cast<half_t>(qv.z * scale), static_cast<half_t>(qv.w * scale)};
+        sQ[wave][lane * 2 + 0] = __builtin_bit_cast(uint32_t, qa);
+        sQ[wave][lane * 2 + 1] = __builtin_bit_cast(uint32_t, qb);
+    }
+    float max_l = (active && sink_logit) ? sink_logit[static_cast<size_t>(m) * n_q_heads + qh] : -1e30f;
+    float sum_exp = (active && sink_logit) ? 1.0f : 0.0f;
+    float o0 = 0.0f, o1 = 0.0f, o2 = 0.0f, o3 = 0.0f;
+    const float* rb_row = (active && rel_bias) ? (rel_bias + (static_cast<size_t>(m) * n_q_heads + qh) * max_rel) : nullptr;
+
+    for (int kt = blk_lo; kt <= blk_hi; kt += KT) {
+        __syncthreads();   // previous tile fully consumed (and sQ written on the first pass)
+        // 32 keys x 32 four-dim chunks = 1024 loads of K and of V, 4 per thread
+        for (int i = tid; i < KT * (HD / 4); i += 256) {
+            const int j = i >> 5, c = i & 31;
+            const int kp = kt + j;
+            uint2 kh = make_uint2(0u, 0u), vh = make_uint2(0u, 0u);
+            if (kp <= blk_hi) {
+                const int ring_p = (swa_window > 0) ? (kp % swa_ring) : kp;
+                const int phys = pt_row[ring_p >> 6];
+                const size_t tok_base = static_cast<size_t>(phys) * 64 + (ring_p & 63);
+                const size_t base = tok_base * elems + kvh * HD + c * 4;
+                if constexpr (FP8_KV) {
+                    const float ks = k_scales ? k_scales[tok_base] : 1.0f;
+                    const float vs = v_scales ? v_scales[tok_base] : 1.0f;
+                    const uint32_t kw = *reinterpret_cast<const uint32_t*>(static_cast<const uint8_t*>(k_pool) + base);
+                    const uint32_t vw = *reinterpret_cast<const uint32_t*>(static_cast<const uint8_t*>(v_pool) + base);
+                    const float k0 = e4m3fn_to_f32(static_cast<uint8_t>(kw & 0xFFu)) * ks;
+                    const float k1 = e4m3fn_to_f32(static_cast<uint8_t>((kw >> 8) & 0xFFu)) * ks;
+                    const float k2 = e4m3fn_to_f32(static_cast<uint8_t>((kw >> 16) & 0xFFu)) * ks;
+                    const float k3 = e4m3fn_to_f32(static_cast<uint8_t>((kw >> 24) & 0xFFu)) * ks;
+                    const float v0 = e4m3fn_to_f32(static_cast<uint8_t>(vw & 0xFFu)) * vs;
+                    const float v1 = e4m3fn_to_f32(static_cast<uint8_t>((vw >> 8) & 0xFFu)) * vs;
+                    const float v2 = e4m3fn_to_f32(static_cast<uint8_t>((vw >> 16) & 0xFFu)) * vs;
+                    const float v3 = e4m3fn_to_f32(static_cast<uint8_t>((vw >> 24) & 0xFFu)) * vs;
+                    const hv2 k01 = {static_cast<half_t>(k0), static_cast<half_t>(k1)}, k23 = {static_cast<half_t>(k2), static_cast<half_t>(k3)};
+                    const hv2 v01 = {static_cast<half_t>(v0), static_cast<half_t>(v1)}, v23 = {static_cast<half_t>(v2), static_cast<half_t>(v3)};
+                    kh = make_uint2(__builtin_bit_cast(uint32_t, k01), __builtin_bit_cast(uint32_t, k23));
+                    vh = make_uint2(__builtin_bit_cast(uint32_t, v01), __builtin_bit_cast(uint32_t, v23));
+                } else {
+                    kh = *reinterpret_cast<const uint2*>(static_cast<const half_t*>(k_pool) + base);
+                    vh = *reinterpret_cast<const uint2*>(static_cast<const half_t*>(v_pool) + base);
+                }
+            }
+            sK[j * KS2 + c * 2 + 0] = kh.x;
+            sK[j * KS2 + c * 2 + 1] = kh.y;
+            sV[j * (HD / 4) + c] = vh;
+        }
+        __syncthreads();
+        if (!active || kt > cur_pos || kt + KT - 1 < k_start) continue;   // whole tile outside this query's window
+
+        // lane j: score of key kt + j
+        const int kp = kt + lane;
+        float sc = -1e30f;
+        if (kp >= k_start && kp <= cur_pos) {
+            const uint32_t* kr = sK + lane * KS2;
+            float a0 = 0.f, a1 = 0.f;
+#pragma unroll 8
+            for (int d2 = 0; d2 < HD / 2; d2 += 2) {
+                a0 = fdot2_f32(sQ[wave][d2], kr[d2], a0);
+                a1 = fdot2_f32(sQ[wave][d2 + 1], kr[d2 + 1], a1);
+            }
+            sc = a0 + a1;
+            const int dist = cur_pos - kp;
+            if (rb_row && dist < max_rel) sc += rb_row[dist];
+        }
+        const float new_max = fmaxf(max_l, wave32_max(sc));
+        const float p = (sc > -1e29f) ? __expf(sc - new_max) : 0.0f;
+        const float alpha = __expf(max_l - new_max);
+        sum_exp = fmaf(sum_exp, alpha, wave32_sum(p));
+        max_l = new_max;
+        sP[wave][lane] = p;
+        __builtin_amdgcn_wave_barrier();
+        o0 *= alpha; o1 *= alpha; o2 *= alpha; o3 *= alpha;
+#pragma unroll 8
+        for (int j = 0; j < KT; ++j) {
+            const float pj = sP[wave][j];
+            const uint2 vh = sV[j * (HD / 4) + lane];
+            float v0, v1, v2, v3;
+            h2_unpack(vh.x, v0, v1); h2_unpack(vh.y, v2, v3);
+            o0 = fmaf(pj, v0, o0); o1 = fmaf(pj, v1, o1); o2 = fmaf(pj, v2, o2); o3 = fmaf(pj, v3, o3);
+        }
+        __builtin_amdgcn_wave_barrier();
+    }
+
+    if (!active) return;
+    const float inv_s = 1.0f / fmaxf(sum_exp, 1e-30f);
+    o0 *= inv_s; o1 *= inv_s; o2 *= inv_s; o3 *= inv_s;
+    if (gate_attn != nullptr) {
+        const float4 gv = *reinterpret_cast<const float4*>(gate_attn + (static_cast<size_t>(m) * n_q_heads + qh) * HD + lane * 4);
+        o0 *= 1.0f / (1.0f + __expf(-gv.x));
+        o1 *= 1.0f / (1.0f + __expf(-gv.y));
+        o2 *= 1.0f / (1.0f + __expf(-gv.z));
+        o3 *= 1.0f / (1.0f + __expf(-gv.w));
+    }
+    *reinterpret_cast<float4*>(O_out + (static_cast<size_t>(m) * n_q_heads + qh) * HD + lane * 4) = make_float4(o0, o1, o2, o3);
+}
+
 // 4-Wave Split-KV Flash-SWA / Flash-GQA for small batches (M <= 8: B=1 decode & B=8 DSpark verify!):
 // Launches 1 block per (qh, m) = 24 blocks x 4 waves = 96 waves at B=1 (4x-8x faster at P=256..2048!).
 // Zero barrier in the entire KV loop; 1 single __syncthreads() at the end merges the 4 waves' online softmax!
@@ -2382,13 +2523,64 @@ __global__ void __launch_bounds__(128) k3_flash_swa_gqa_prefill_wmma(
 // k4: Fused MoE Router (Top-K Sigmoid with F32 Bias + route_scale=8.0 Renormalization)
 // =================================================================================================
 
+// Opt-in router TAIL SKIP (see ../cuda/ink_tail_skip.cuh for the spec): a dropped slot gets expert id -1 and weight 0; the direct MoE kernels
+// (k_moe_direct_w13_situ / k_moe_direct_w2_par) read no weights for id -1. Only the direct (B <= 4 / exact rows) path passes on = 1.
+struct HipTailArgs {
+    int on = 0;
+    int first_rank0 = 6;
+    int renorm = 1;
+    int visit = 0;
+    float thr = 0.0f;
+    float cap = 0.0f;
+    unsigned long long* cnt = nullptr;   // [48 * 10] or nullptr
+};
+
+__device__ __forceinline__ void hip_tail_apply(const float* s_prob, const int32_t* s_chosen, int K_top, float wsum, float route_scale, HipTailArgs ta,
+                                                int m, int32_t* topk_ids, float* topk_weights) {
+    // thread 0 only: the exact weights are p / wsum * route_scale; the dropped ranks are those >= first_rank0 whose share p / wsum is <= thr
+    unsigned drop = 0u;
+    float dropped_share = 0.0f, dropped_p = 0.0f;
+    const float inv_ws = 1.0f / (wsum + 1e-20f);
+    if (ta.on) {
+        for (int k = K_top - 1; k >= 1; --k) {
+            if (k < ta.first_rank0) continue;
+            const float pk = s_prob[s_chosen[k]];
+            const float sh = pk * inv_ws;
+            if (sh <= ta.thr && (ta.cap <= 0.0f || dropped_share + sh <= ta.cap)) { drop |= (1u << k); dropped_share += sh; dropped_p += pk; }
+        }
+    }
+    const float kept = (ta.on && ta.renorm && drop) ? (wsum - dropped_p) : wsum;
+    const float inv_w = route_scale / (kept + 1e-20f);
+    for (int k = 0; k < K_top; ++k) {
+        if (drop & (1u << k)) { topk_ids[m * K_top + k] = -1; topk_weights[m * K_top + k] = 0.0f; }
+        else { topk_ids[m * K_top + k] = s_chosen[k]; topk_weights[m * K_top + k] = s_prob[s_chosen[k]] * inv_w; }
+    }
+    if (ta.on && ta.cnt) {
+        unsigned long long* c = ta.cnt + static_cast<size_t>(ta.visit) * 10;
+        atomicAdd(c + 0, 1ull);
+        if (drop) {
+            for (int k = 1; k < K_top; ++k) if (drop & (1u << k)) atomicAdd(c + 1 + k, 1ull);
+            atomicAdd(c + 9, static_cast<unsigned long long>(dropped_share * 1.0e6f + 0.5f));
+        }
+    }
+}
+
+// Host side: the arguments of one router launch (off unless STRATA_INK_TAIL_SKIP is set, the visit is in its mask and the path is the direct one).
+inline HipTailArgs hip_tail_args(int visit_no, bool direct_path) {
+    HipTailArgs ta;
+    const strata::ink::InkTailCfg& tc = strata::ink::ink_tail_cfg();
+    if (!direct_path || !tc.on || visit_no < 0 || visit_no >= strata::ink::kInkTailVisits || !((tc.visit_mask >> visit_no) & 1ull)) return ta;
+    ta.on = 1; ta.first_rank0 = tc.first_rank - 1; ta.renorm = tc.renorm; ta.visit = visit_no; ta.thr = tc.thr; ta.cap = tc.cap;
+    return ta;
+}
+
 // Grid: (M,), Block: 128 (1 thread per expert e=0..127, exact deterministic tie-break by smallest eid!)
 __global__ void __launch_bounds__(128) k4_moe_router_topk(
     const float* __restrict__ logits,  // [M, 128]
     const float* __restrict__ bias,    // nullptr or [128] (F32 gate.bias)
     int32_t* __restrict__ topk_ids,    // [M, K_top]
     float* __restrict__ topk_weights,  // [M, K_top]
-    int M, int K_top, float route_scale = 8.0f) {
+    int M, int K_top, float route_scale = 8.0f, HipTailArgs ta = HipTailArgs()) {
     const int m = blockIdx.x;
     if (m >= M) return;
     const int e = threadIdx.x;
@@ -2433,15 +2625,18 @@ __global__ void __launch_bounds__(128) k4_moe_router_topk(
     }
     if (e == 0) {
         float wsum = 0.0f;
-        for (int k = 0; k < K_top; ++k) {
-            const int best_e = s_chosen[k];
-            topk_ids[m * K_top + k] = best_e;
-            const float w = s_prob[best_e];
-            topk_weights[m * K_top + k] = w;
-            wsum += w;
+        for (int k = 0; k < K_top; ++k) wsum += s_prob[s_chosen[k]];
+        if (ta.on) {
+            hip_tail_apply(s_prob, s_chosen, K_top, wsum, route_scale, ta, m, topk_ids, topk_weights);
+        } else {
+            for (int k = 0; k < K_top; ++k) {
+                const int best_e = s_chosen[k];
+                topk_ids[m * K_top + k] = best_e;
+                topk_weights[m * K_top + k] = s_prob[best_e];
+            }
+            const float inv_w = route_scale / (wsum + 1e-20f);
+            for (int k = 0; k < K_top; ++k) topk_weights[m * K_top + k] *= inv_w;
         }
-        const float inv_w = route_scale / (wsum + 1e-20f);
-        for (int k = 0; k < K_top; ++k) topk_weights[m * K_top + k] *= inv_w;
     }
 }
 
@@ -2454,7 +2649,7 @@ __global__ void __launch_bounds__(128) k4_moe_router_topk_f16(
     half_t* __restrict__ mlpf16,       // [M, D]
     int32_t* __restrict__ topk_ids,    // [M, K_top]
     float* __restrict__ topk_weights,  // [M, K_top]
-    int M, int D, int K_top, float route_scale = 8.0f) {
+    int M, int D, int K_top, float route_scale = 8.0f, HipTailArgs ta = HipTailArgs()) {
     const int m = blockIdx.x;
     if (m >= M) return;
     const int e = threadIdx.x;
@@ -2506,15 +2701,18 @@ __global__ void __launch_bounds__(128) k4_moe_router_topk_f16(
     }
     if (e == 0) {
         float wsum = 0.0f;
-        for (int k = 0; k < K_top; ++k) {
-            const int best_e = s_chosen[k];
-            topk_ids[m * K_top + k] = best_e;
-            const float w = s_prob[best_e];
-            topk_weights[m * K_top + k] = w;
-            wsum += w;
+        for (int k = 0; k < K_top; ++k) wsum += s_prob[s_chosen[k]];
+        if (ta.on) {
+            hip_tail_apply(s_prob, s_chosen, K_top, wsum, route_scale, ta, m, topk_ids, topk_weights);
+        } else {
+            for (int k = 0; k < K_top; ++k) {
+                const int best_e = s_chosen[k];
+                topk_ids[m * K_top + k] = best_e;
+                topk_weights[m * K_top + k] = s_prob[best_e];
+            }
+            const float inv_w = route_scale / (wsum + 1e-20f);
+            for (int k = 0; k < K_top; ++k) topk_weights[m * K_top + k] *= inv_w;
         }
-        const float inv_w = route_scale / (wsum + 1e-20f);
-        for (int k = 0; k < K_top; ++k) topk_weights[m * K_top + k] *= inv_w;
     }
 }
 
