@@ -22,7 +22,7 @@ matters (upstream rewrites it every release).
   a member, one call) behind a `STRATA_*` env switch that is off by default, so upstream changes near the hook rarely
   conflict.
 - **A patch must pay off.** It needs an interleaved A/B on the same binary that beats noise, with identical greedy
-  output. Small wins inside busy upstream files are not worth carrying.
+  output, and it must also win under `strata bench run` standard-v1 (thinking on), not only in a narrow test. Small wins inside busy upstream files are not worth carrying.
 - **Files to avoid:** `terminal/data/settings-register.json` (rewritten upstream almost daily),
   `engine/src/program/generate.cpp` (66 upstream commits in 30 days) and `AGENTS.md`. `pr/` branches still need
   their register entry, because upstream's check runs in its CI; `fork/` branches leave the register alone (the
@@ -38,8 +38,16 @@ matters (upstream rewrites it every release).
 | strata-inkling on RDNA2: rocBLAS prompt route, tiled attention, KV splits | `pr/ink-rdna2-prompt` | upstream PR #7335, open | Inkling prompt tok/s |
 | int8 expert kernels: IQ4_XS as a down format | `fa969cfd8` | upstream PR #6197, open | - |
 | llama.cpp MMQ build path (reverts upstream's removal, #6269; about 30K lines of vendored `ggml-cuda`) | `5476349c4`, `3f2318154` | fork-only: Ornith prompt +40%. **The largest maintenance cost.** | Every release: does stock's prompt path match the MMQ build on Ornith? If yes, drop the revert |
-| `STRATA_Q36_ROUTE_SIDE`: hybrid routing copies on a side stream (`engine/src/qwen35/q36_route_side.cuh` + 7 lines in `q36_engine.cu`) | `fork/q36-route-side` | fork-only: Ornith +4..6%, official Qwen3.6 UD-Q4_K_XL −2.3% | If `moe_hybrid_gpu` changed: Ornith on/off A/B, greedy md5 must match |
 | `tools/local/strata-switch` and local setup fixes | various | fork-only tooling | - |
+
+## Dropped patches
+
+- `STRATA_Q36_ROUTE_SIDE` (hybrid MoE routing copies on a side stream; branch `fork/q36-route-side`, kept on origin
+  for reference). Removed 2026-11-28. It won a narrow A/B (400-token story, temperature 0.6, thinking off: Ornith
+  +4%), but lost under `strata bench run` standard-v1 (thinking on, temperature 1.0, 4K/16K prompts): Ornith
+  −1.0..−1.5% in 2 interleaved pairs, and Qwen3.6 UD-Q4_K_XL −2.3%. The hop between HIP streams costs ~20 µs on
+  whichever side takes it. Data: `strata-bench/2026-11-28-ornith-routeside-std/`, `strata-bench/q36-route-side-stock/`.
+  **Lesson: accept a speed patch only after standard-v1, interleaved, on the real config.**
 
 ## How to recheck a patch
 
