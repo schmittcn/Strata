@@ -40,6 +40,12 @@ matters (upstream rewrites it every release).
 | llama.cpp MMQ build path (reverts upstream's removal, #6269; about 30K lines of vendored `ggml-cuda`) | `5476349c4`, `3f2318154` | fork-only: Ornith prompt +40%. **The largest maintenance cost.** | Every release: does stock's prompt path match the MMQ build on Ornith? If yes, drop the revert |
 | `tools/local/strata-switch` and local setup fixes | various | fork-only tooling | - |
 
+## Upstream issues we filed that affect this setup
+
+| Issue | What it means here | When it is fixed |
+|---|---|---|
+| [#7430](https://github.com/Niko1221/Strata/issues/7430): Inkling's thinking-budget wrap-up pass is counted as prompt time; with DFlash 2 the wrap-up sometimes re-reads all the thinking | Inkling's prompt tok/s in `strata bench run` (prompt-4k especially) swings by up to ~13% between identical runs. Compare Inkling runs by time to first token or 16K prompt figures, not prompt-4k. With `drafting: dflash2` (the live setting), a reply that hits the budget can pause ~0.7 s mid-answer while the thinking is re-read. | Nothing to undo in the fork (no workaround is carried). After the upstream merge, rerun the Inkling standard-v1 pairs: prompt-4k should stop swinging. |
+
 ## Dropped patches
 
 - `STRATA_Q36_ROUTE_SIDE` (hybrid MoE routing copies on a side stream; branch deleted; the code is commit
