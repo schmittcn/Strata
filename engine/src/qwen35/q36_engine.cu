@@ -40,6 +40,7 @@
 #include "strata/qwen35/expert_info.hpp"
 #include "strata/qwen35/hybrid_fit.hpp"
 #include "q36_kernels.cuh"
+#include "q36_route_side.cuh"
 #if defined(STRATA_Q36_CPU_POOL)
 #include "strata/kernels/cpu/native_expert.hpp"
 #include "strata/kernels/cpu/pool.hpp"
@@ -1950,6 +1951,7 @@ struct Engine {
     long long chk_rows = 0, chk_bad = 0;
     double chk_max = 0;
     cudaEvent_t ev_route = nullptr;
+    Q36RouteSide route_side;   // STRATA_Q36_ROUTE_SIDE (q36_route_side.cuh)
     uint8_t* stage[2] = {};
     cudaStream_t cst = nullptr;
     cudaEvent_t ev_copy[2] = {}, ev_used[2] = {};
@@ -3299,9 +3301,11 @@ struct Engine {
         const auto& g = m->g;
         const int N = (int) g.n_embd, Kp = (int) m->top_k;
         const int64_t n_ent = (int64_t) T * Kp;
-        CK(cudaMemcpyAsync(h_ids, ids, (size_t) n_ent * 4, cudaMemcpyDeviceToHost, st));
-        CK(cudaMemcpyAsync(h_h, h, (size_t) T * N * 4, cudaMemcpyDeviceToHost, st));
-        CK(cudaEventRecord(ev_route, st));
+        if (!route_side.copy(st, h_ids, ids, (size_t) n_ent * 4, h_h, h, (size_t) T * N * 4, ev_route)) {
+            CK(cudaMemcpyAsync(h_ids, ids, (size_t) n_ent * 4, cudaMemcpyDeviceToHost, st));
+            CK(cudaMemcpyAsync(h_h, h, (size_t) T * N * 4, cudaMemcpyDeviceToHost, st));
+            CK(cudaEventRecord(ev_route, st));
+        }
         group_entries(L, hy[li].slot_of_d, T);
         if (!xq_post) quant(h, N, T, xq);   // the experts' and the shared expert's input
         K::native_expert_grouped(L.L, grp_ptr, grp_start, n_groups, ent_dst, ent_tok,
