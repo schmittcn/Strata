@@ -70,7 +70,7 @@ macro(strata_hip_mmq)
     set_source_files_properties(${_strata_pf_own_sources}
                                 PROPERTIES INCLUDE_DIRECTORIES "${STRATA_HIP_COMPAT_INCLUDE_DIR}")
     add_library(strata_mmq STATIC ${_strata_mmq_sources})
-    add_library(strata_pf_own STATIC ${_strata_pf_own_sources})
+    add_library(strata_pf_own STATIC ${_strata_pf_own_sources} src/prefill/moe_fp4_tc_absent.cpp src/prefill/dense_fp4_tc_absent.cpp src/prefill/moe_fp8_mxf_tc_absent.cpp)
     target_include_directories(strata_mmq
       PRIVATE "${_strata_gg}/include" "${_strata_gg}/src" "${_strata_mmq}"
       PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
@@ -246,4 +246,16 @@ if(STRATA_HIP_GFX906)
   add_executable(gfx906_qsa_query_swizzle_probe bench/gfx906_qsa_query_swizzle_probe.cpp)
   target_link_libraries(gfx906_qsa_query_swizzle_probe PRIVATE strata_kernels ${_strata_gpu_runtime_target})
 endif()
+endmacro()
+
+# strata_pf_own (Strata's own prompt kernels) with strata_mmq's include directories (in their order, the trellis overlay's
+# first), definitions and options: the same command line for the files that left strata_mmq (CUDA and HIP)
+macro(strata_pf_own_mirror)
+  foreach(_strata_p INCLUDE_DIRECTORIES COMPILE_DEFINITIONS COMPILE_OPTIONS)
+    get_target_property(_strata_v strata_mmq ${_strata_p})
+    if(_strata_v)
+      set_property(TARGET strata_pf_own PROPERTY ${_strata_p} "${_strata_v}")
+    endif()
+  endforeach()
+  target_include_directories(strata_pf_own INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 endmacro()
