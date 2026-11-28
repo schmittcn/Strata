@@ -1,5 +1,5 @@
 #!/bin/sh
-# strata-switch coder|iq2|swift|ornith|ornith-q6|<model id>|stop|status|update-check|update|apply|edit|help: manage the local Strata server
+# strata-switch iq2|swift|ornith|<model id>|stop|status|update-check|update|apply|edit|help: manage the local Strata server
 set -eu
 SRC="$(cd "$(dirname "$(readlink -f "$0")")/../.." && pwd)"
 STATE="${XDG_STATE_HOME:-$HOME/.local/state}"
@@ -50,11 +50,9 @@ update_src() {
 }
 
 case "${1:-}" in
-  coder) id=coder-iq1_m ;;
   iq2)   id=iq2_xs ;;
   swift) id=swift-iq3_s ;;
   ornith) id=ornith-iq4_xs ;;
-  ornith-q6) id=ornith-q6_k ;;
   stop)  strata-profiles stop; exit 0 ;;
   status) m=$(current); [ -n "$m" ] && echo "$m" || echo "no server on :$PORT"; exit 0 ;;
   update-check)
@@ -71,11 +69,9 @@ case "${1:-}" in
   help|-h|--help) cat <<'EOF'
 strata-switch: manage the local Strata server (port 8095)
 
-  strata-switch coder         start Coder IQ1_M (faster, for code, with F16)
   strata-switch iq2           start IQ2_XS (general, less RAM, with F16)
   strata-switch swift         start Swift 1.5 IQ3_S (best quality, slower, about 50-60 GB RAM, 128K)
   strata-switch ornith        start Ornith 1.5 35B-A3B IQ4_XS (mradermacher i1; Qwen3.6 path, 256K, fast)
-  strata-switch ornith-q6     start Ornith 1.5 35B-A3B Q6_K (official GGUF; 128K, best quality, slower)
   strata-switch <model id>    start any model `strata models list` shows
   strata-switch status        show the loaded model
   strata-switch stop          stop the server, free GPU and RAM
@@ -93,7 +89,7 @@ Log: ~/.local/state/strata/runtime/omarchy-<model id>.server.log   Backups: ~/.l
 Monitor: strata monitor --once   (web UI: http://127.0.0.1:8095/)
 EOF
     exit 0 ;;
-  ""|-*) echo "usage: strata-switch coder|iq2|swift|ornith|ornith-q6|<model id>|stop|status|update-check|update|apply|edit|help" >&2; exit 2 ;;
+  ""|-*) echo "usage: strata-switch iq2|swift|ornith|<model id>|stop|status|update-check|update|apply|edit|help" >&2; exit 2 ;;
   *) id=$1 ;;
 esac
 
