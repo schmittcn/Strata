@@ -12429,7 +12429,7 @@ def main() -> int:
                  "2-3-bit models" if in_budget else "") + "; quality checked against llama.cpp")
         if hip and MODELS[model].get("nvidia_only"):
             # #429 (jkuepker): checked before the 111 GB download.  The HIP engine has no prompt kernels for its
-            # Q4_K / Q5_K experts and it has not been run on AMD: asked, not refused
+            # Q4_K / Q5_K experts (STRATA_MMQ_KQUANTS is CUDA-only) and it has not been run on AMD: asked, not refused
             confirm_risk(f"{model} has not been run on AMD cards yet: its prompt kernels are NVIDIA-only, so on "
                          f"{gpu_name(gpu)} long prompts read much more slowly, and it may not work at all",
                          bool(a.model), a.yes, f"{model} is NVIDIA-only so far", "choose one of the 2-3-bit models, "
