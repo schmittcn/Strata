@@ -7,6 +7,11 @@
 // before, and ev_done (the host's ev_route) is recorded after the copies there, so the host reads them as before.
 // Nothing on the main stream writes ids or h before the host has waited on ev_done (the next layer's kernels are
 // launched after moe_hybrid_cpu), so the copies cannot race.  Off by default; =0 or unset keeps the old order.
+//
+// FORK-ONLY (schmittcn/Strata, not upstreamed): it moves a ~20 us stream hop from the GPU experts to the host, so it
+// wins only when the GPU half is the critical path - Ornith IQ4_XS +4..6%, Qwen3.6 UD-Q4_K_XL -2.3% (stock 0.2.23,
+// strata-bench/q36-route-side-stock).  Not in settings-register.json on purpose: that file churns upstream daily.
+// After an upstream merge: rerun the Ornith on/off A/B (greedy md5 must match) before keeping it on.
 #pragma once
 
 #include <cstdio>
