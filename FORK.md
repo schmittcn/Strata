@@ -42,8 +42,8 @@ matters (upstream rewrites it every release).
 
 ## Dropped patches
 
-- `STRATA_Q36_ROUTE_SIDE` (hybrid MoE routing copies on a side stream; branch `fork/q36-route-side`, kept on origin
-  for reference). Removed 2026-11-28. It won a narrow A/B (400-token story, temperature 0.6, thinking off: Ornith
+- `STRATA_Q36_ROUTE_SIDE` (hybrid MoE routing copies on a side stream; branch deleted; the code is commit
+  `a379113d0` in `local`'s history). Removed 2026-11-28. It won a narrow A/B (400-token story, temperature 0.6, thinking off: Ornith
   +4%), but lost under `strata bench run` standard-v1 (thinking on, temperature 1.0, 4K/16K prompts): Ornith
   −1.0..−1.5% in 2 interleaved pairs, and Qwen3.6 UD-Q4_K_XL −2.3%. The hop between HIP streams costs ~20 µs on
   whichever side takes it. Data: `strata-bench/2026-11-28-ornith-routeside-std/`, `strata-bench/q36-route-side-stock/`.
