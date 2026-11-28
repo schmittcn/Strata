@@ -60,4 +60,7 @@ matters (upstream rewrites it every release).
 - Start models with `strata-switch <id>`, never with `strata-profiles start` (that runs an old installed server).
 - Ornith's binary is built from `local` in `build-ornith/` and copied to `terminal/engine/strata-ornith`. Keep a
   `.bak-<date>` of the old binary.
+- Inkling's binary (`terminal/engine/strata-inkling-rdna2`, pinned in patches.json) is built from `local` in `build-ink/`
+  (target `strata-inkling`, gfx1030, `STRATA_BUILD_INKLING2=ON`). Since 2026-11-28 it is 0.2.23 + PR #7335. Before that
+  it was an older experimental build on an 11-25 upstream base (kept as `.bak-20261128-exp1125`).
 - More measured lessons: `/home/chris/LLM/LEARNINGS.md`.
